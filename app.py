@@ -26,10 +26,17 @@ sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1NaitOeamRWgkJlj5JCB
 
 db = pd.DataFrame(sh.sheet1.get_all_records())
 
-st.info("""Here is some info you should keep in mind when scoring:
+st.info("""
+### Guidelines
+You will be labeling search engine result for their relevancy to understanding narratives and stakeholder sentiment as well as general context and information about a specified renewable energy project. Once you have entered your name, you will begin labeling search engine results related to a given renewable energy project.
+For each result, you must determine whether the result is or is not relevant to the project.
+If a result is relevant, check the box associated with that result. Otherwise, leave it unchecked.
+Once complete click the 'Submit Results' button
 
-Anushree info goes here
-
+### Criteria
+A result is relevant if it contains any of the following:
+- Details or specifications of the project, such as timelines, local approvals, delays, etc.
+- Details on stakeholder sentiment (positive, negative, or both) about the project, such as an op-ed or lawsuit from proponent(s) and/or opponent(s)
 """)
 
 name = st.text_input("What is your name?")
