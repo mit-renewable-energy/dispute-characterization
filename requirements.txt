@@ -1,4 +1,4 @@
 pandas
-dotenv
+python-dotenv
 gspread
 streamlit_js_eval
