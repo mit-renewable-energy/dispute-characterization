@@ -14,7 +14,7 @@ dotenv.load_dotenv()
 def get_gc():
     """Get gspread client"""
     with open("gcloud.json", "w") as f:
-        f.write(os.getenv("GOOGLE_API_KEY"))
+        f.write(st.secrets.get("GOOGLE_API_KEY"))
     gc = gspread.service_account(filename="gcloud.json")
     return gc
 
