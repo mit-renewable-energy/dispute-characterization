@@ -59,7 +59,7 @@ for j, result in enumerate(json.loads(active_row['result'])):
     {result['description'] if "description" in result else "No description available"}
     """
 
-    results[j] = st.checkbox("Is this relevant? (i.e. would you click this)", key=f"{j}")
+    results[j] = st.checkbox("Is this relevant (would you click this)?", key=f"{j}")
 
 
 if st.button("Submit Results", use_container_width=True):
