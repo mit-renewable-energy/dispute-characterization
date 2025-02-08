@@ -11,15 +11,13 @@ import modal
 import requests
 from unstructured.partition.auto import partition
 from unstructured.cleaners.core import group_broken_paragraphs
-from pydantic import BaseModel, Field
-from typing import List
-from anthropic import Anthropic
-import instructor
+
 
 
 def pull_unstructured():
-    pass
-# downlaod punkt stuff here
+    import nltk
+    nltk.download('punkt')
+    nltk.download('averaged_perceptron_tagger')
 
 
 bright_data_search_image = (
@@ -30,13 +28,15 @@ bright_data_search_image = (
                  #"boto3", "pydantic", "typing", "openai", "anthropic", "instructor")
                 )
     .apt_install("libgl1-mesa-glx", "libglib2.0-0", "python3-opencv")
+    .run_commands("apt-get install -y poppler-utils tesseract-ocr")
+    .pip_install("nltk")
     .run_function(pull_unstructured)
 )
 
 stub = modal.Stub("bright_data_search", image=bright_data_search_image)
 
-@stub.function(concurrency_limit=10)
-def partition_content(search_results):
+@stub.function(concurrency_limit=1000, timeout=1800)
+async def partition_content(search_results):
     headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET',
@@ -55,35 +55,59 @@ def partition_content(search_results):
 
     current_results = search_results
     organic_results = current_results.get('organic', [])
+    if organic_results == []:
+        return {
+            "full_text": "No organic results found.",
+            "individual_results": []
+        }
 
     end_result = []
 
-    for search_result in tqdm(organic_results):
+    for index, search_result in enumerate(organic_results):
         current_result = {}
+        import time
+        start_time = time.time()
+        timeout_secs = 15
         try:
             # print(search_result['link'])
             current_result['link'] = search_result['link']
-            r = requests.get(search_result['link'], headers, timeout=30)
+            if time.time() - start_time > timeout_secs:
+                raise TimeoutError
+            r = requests.get(search_result['link'], headers, timeout=10)
+            if time.time() - start_time > timeout_secs:
+                raise TimeoutError
             content_type = r.headers.get('content-type')
+            # print("Content type: ", content_type, "Time elapsed: ", time.time() - start_time)
+            if time.time() - start_time > timeout_secs:
+                raise TimeoutError
             if 'text/html' in content_type:
-                text = requests.get(f"https://r.jina.ai/" + search_result['link']).text
-                # elements = partition_html(url=search_result['link'], headers=headers, html_assemble_articles=True, timeout=30)
+                if time.time() - start_time > timeout_secs:
+                    raise TimeoutError
+                text = requests.get(f"https://r.jina.ai/" + search_result['link'], timeout=10).text
+                if time.time() - start_time > timeout_secs:
+                    raise TimeoutError
             else:
-                elements = partition(url=search_result['link'], headers=headers, timeout=30)
+                if time.time() - start_time > timeout_secs:
+                    raise TimeoutError
+                # print(f"Not HTML content, current time: {time.time() - start_time}")
+                elements = partition(url=search_result['link'], headers=headers, timeout=10, strategy='fast')
                 text = "\n".join(element.text for element in elements)
-            # add text to new 'content' in ['organic'] such that it updates in sample_25
             current_result['content'] = group_broken_paragraphs(truncate_content(text))
-        except requests.exceptions.Timeout:
+        except TimeoutError:
+            # print(f"Timed out, current time is {time.time() - start_time}")
             current_result['content'] = 'Timed out'
         except:
+            # print(f"Could not access content, current time is {time.time() - start_time}")
             current_result['content'] = 'Could not access content'
+        current_result['article_letter'] = chr(65 + index)
+        current_result['link'] = search_result.get("link", "")
         current_result['title'] = search_result.get("title", "")
         current_result['description'] = search_result.get("description", "")
         end_result.append(current_result)
     
     return {
-        "full_text": "\n\n========================\n\n".join([
-            f"{r['title']}\n{r['description']}\n{r['content']}"
+        "full_text": "\n".join([
+            f"<doc>\nArticle Letter: {r['article_letter']}\n{r['title']}\n{r['description']}\n{r['content']}\n</doc>"
             for r in end_result
         ]),
         "individual_results": end_result
@@ -91,7 +115,6 @@ def partition_content(search_results):
 
 @backoff.on_exception(backoff.expo, Exception, max_time=120)
 def get_search_results(search_query: str):
-    # if row['search_query'] != 'initial' or pd.isnull(row['result']):
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler(
             {'http': os.environ['BRIGHTDATA_SERP_KEY'],
@@ -101,59 +124,9 @@ def get_search_results(search_query: str):
     results = json.loads(opener.open(f'http://www.google.com/search?q={search_query}&brd_json=1').read())
     return results
 
-class ProjectPerceptions(BaseModel):
-    mention_support: int = Field(..., description="1 if any mention of support (e.g., an individual or organization mentioned in support of the project), 0 if not")
-    mention_opp: int = Field(..., description="1 if any mention of opposition (e.g., an individual or organization mentioned in opposition of the project), 0 if not")
-    physical_opp: int = Field(..., description="1 if evidence of physical opposition involving at least one person (e.g., protests, marches, picketing, mass presence at governmental meetings), 0 if not")
-    policy_opp: int = Field(..., description="1 if evidence of the use or attempted use of legislation or permitting to block projects, 0 if not")
-    legal_opp: int = Field(..., description="1 if evidence of legal challenges and the use of courts to block projects, 0 if not")
-    opinion_opp: int = Field(..., description="1 if any opinion-editorials or other media explicitly opposing a project exist, 0 if not")
-    # Add binaries for mentions of underlying sources of opposition (e.g., environmental, economic, social, etc.)
-    narrative: str = Field(..., description="A one-paragraph narrative summary of the public perceptions of the specified renewable energy project, including the project name, location, and developer, when it was proposed, the public response, and details on any evidence of opposition or support.")
-
-class ProjectPerceptionsDetailed(BaseModel):
-    mention_support: int = Field(..., description="1 if any mention of support (e.g., an individual or organization mentioned in support of the project), 0 if not")
-    mention_opp: int = Field(..., description="1 if any mention of opposition (e.g., an individual or organization mentioned in opposition of the project), 0 if not")
-    # binaries for expressions of opposition
-    physical_opp: int = Field(..., description="1 if evidence of physical opposition involving at least one person (e.g., protests, marches, picketing, mass presence at governmental meetings), 0 if not")
-    policy_opp: int = Field(..., description="1 if evidence of the use or attempted use of legislation (like ordinances or moratoria) or permitting to block projects, 0 if not")
-    legal_opp: int = Field(..., description="1 if evidence of legal challenges and the use of courts to block projects, 0 if not")
-    opinion_opp: int = Field(..., description="1 if any opinion-editorials or other media explicitly opposing a project exist, 0 if not")
-    # binaries for underlying sources of opposition (e.g., environmental, economic, social, etc.)
-    environmental_opp: int = Field(..., description="1 if evidence of environmental concerns, like water, soil, wildlife, and ecological impacts, 0 if not")
-    participation_opp: int = Field(..., description="1 if evidence of opposition stemming from a perceived or real lack of participation of fairness in the project, 0 if not")
-    tribal_opp: int = Field(..., description="1 if evidence of Tribal opposition, 0 if not")
-    health_opp: int = Field(..., description="1 if evidence of opposition from real or perceived health and safety risks from the project, 0 if not")
-    intergov_opp: int = Field(..., description="1 if any evidence of disagreement between local, regional, and federal government about the project, 0 if not")
-    property_opp: int = Field(..., description="1 if evidence of opposition from real or perceived property value impacts, 0 if not")
-    # binaries for additional compensation (CBAs) and delays
-    compensation: int = Field(..., description="1 if evidence of support or opposition from real or perceived lack of additional non-required compensation or benefits from the project, 0 if not")
-    delay: int = Field(..., description="1 if evidence of a substantial delay (months or years) in project development because of opposition, 0 if not")
-    co_land_use: int = Field(..., description="1 if evidence of project co-existing with other land uses, such as agriculture, recreation, and grazing, 0 if not")
-    narrative: str = Field(..., description="A one-paragraph narrative summary of the public perceptions of the specified renewable energy project, including the project name, location, and developer, when it was proposed, the public response, and details on any evidence of opposition or support.")
-
-
-class ProjectSummary(BaseModel):
-    scores: List[ProjectPerceptionsDetailed]
-
-@backoff.on_exception(backoff.expo, Exception, max_time=120)
-def get_project_summary(plant_info, content):
-    client = instructor.from_anthropic(Anthropic())
-    project_perceptions = client.messages.create(
-        model="claude-3-haiku-20240307",
-        response_model=ProjectSummary,
-        max_tokens=4096,
-        messages=[
-            {"role": "system", "content": f'Our aim is to understand the public opinion and perceptions of a particular renewable energy project based solely on online media evidence from a search engine query on the project. Based on the full text content of all search results, we would like to answer several binary questions about whether or not there is evidence of opposition or support for the project. Use only the text content provided to answer these questions with a “1” if evidence is found and “0” if not, and finally to create a one-paragraph summary of public perceptions of the project. Note that none of the info in the content may be relevant to the project in question, and if so, all integers should be 0 and narrative should be "No relevant info found.".'},
-            {"role": "user", "content": f"Here is the name and location of the project in question ({plant_info}) from which the following search result content is generated: {content}"}
-        ],
-    )
-    assert isinstance(project_perceptions, ProjectSummary)
-    return project_perceptions
-
 
 @stub.local_entrypoint()
-def main():
+async def main():
     print("This code is running locally!")
     plant_codes = pd.read_csv('ready_to_search.csv')['plant_code']
 
@@ -163,16 +136,24 @@ def main():
     ]
 
     search_results = []
-    for plant_code in plant_codes[:1]:
+    for plant_code in plant_codes:
         with open(f'results/search/{plant_code}.json', 'r') as f:
             search_result = json.load(f)
             search_results.append(search_result)
     
-    partitioned_results = partition_content.map(search_results)
+    # partitioned_results = partition_content.map(search_results)
 
-    for plant_code, partitioned_result in zip(plant_codes, partitioned_results):
+    # for plant_code, partitioned_result in zip(plant_codes, partitioned_results):
+    #     with open(f'results/content/{plant_code}.json', 'w') as f:
+    #         json.dump(partitioned_result, f)
+    import asyncio
+    async def process_partitioned_content(plant_code, search_result):
+        partitioned_result = await partition_content.remote.aio(search_result)
         with open(f'results/content/{plant_code}.json', 'w') as f:
             json.dump(partitioned_result, f)
+
+    await asyncio.gather(*[process_partitioned_content(plant_code, search_result) for plant_code, search_result in zip(plant_codes, search_results)])
+
 
 #     df = pd.read_csv('ready_to_search.csv')
 #     # run the function remotely on modal
@@ -182,10 +163,11 @@ def main():
 
 
 if __name__ == "__main__":
+    pass
     
-    df = pd.read_csv('ready_to_search.csv')
-    queries = list(df['search_query'])
-    plant_codes = list(df['plant_code'])
+    # df = pd.read_csv('ready_to_search.csv')
+    # queries = list(df['search_query'])
+    # plant_codes = list(df['plant_code'])
     
     # code for running the search engine results function in parallel
     # with ThreadPoolExecutor(max_workers=100) as executor:
@@ -198,29 +180,65 @@ if __name__ == "__main__":
     #         with open(f'results/search/{plant_code}.json', 'w') as f:
     #             json.dump(result, f)
 
-    plant_codes = [
-        pc for pc in plant_codes
-        if not os.path.exists(f'results/scores/{pc}.json')
-    ]
+    # code for running the get_relenvance_scores function in parallel
+    # plant_codes = [
+    #     pc for pc in plant_codes
+    #     if not os.path.exists(f'results/relevance/{pc}.json')
+    # ]
 
-    plant_infos = [info for code, info in zip(df['plant_code'], df['plant_info']) if code in plant_codes]
-    all_content = []
-    for plant_code in plant_codes[:1]:
-        with open(f'results/content/{plant_code}.json', 'r') as f:
-            content = json.load(f)
-            all_content.append(content['full_text'])
+    # def process_plant_code(plant_code, search_query):
+    #     search_file_path = f'results/search/{plant_code}.json'
+    #     with open(search_file_path, 'r') as f:
+    #         search_data = json.load(f)
+    #         organic_results = search_data.get('organic', [])
+    #         if organic_results == []:
+    #             return []
+    #         formatted_results = []
+    #         for index, article in enumerate(organic_results):
+    #             formatted_article = f"Article Letter: {article['article_letter']}, Title: {article['title']}, Display URL: {article['display_link']}, Description: {article['description']}"
+    #             formatted_results.append(formatted_article)
+    #         search_result_string = "<article>" + "</article>\n<article>".join(formatted_results) + "</article>"
+    #         return get_relevance_scores(search_query, search_result_string)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_plant_code = {
-            executor.submit(get_project_summary, plant_info, content): plant_code
-            for plant_code, plant_info, content in zip(plant_codes, plant_infos, all_content)
-            if not os.path.exists(f'results/scores/{plant_code}.json')
-        }
-        for future in as_completed(future_to_plant_code):
-            plant_code = future_to_plant_code[future]
-            summary = future.result()
-            with open(f'results/scores/{plant_code}.json', 'w') as f:
-                json.dump(summary.model_dump_json(), f)
+    # with ThreadPoolExecutor(max_workers=5) as executor:
+    #     future_to_plant_code = {
+    #         executor.submit(process_plant_code, plant_code, df[df['plant_code'] == plant_code]['search_query'].iloc[0]): plant_code
+    #         for plant_code in plant_codes
+    #         if not os.path.exists(f'results/relevance/{plant_code}.json')
+    #     }
+    #     for future in tqdm(as_completed(future_to_plant_code), total=len(future_to_plant_code)):
+    #         plant_code = future_to_plant_code[future]
+    #         relevance_score = future.result()
+    #         if relevance_score == []:
+    #             with open(f'results/relevance/{plant_code}.json', 'w') as f:
+    #                 json.dump(relevance_score, f)
+    #         else:
+    #             with open(f'results/relevance/{plant_code}.json', 'w') as f:
+    #                 json.dump(relevance_score.model_dump(), f)
+
+    # plant_codes = [
+    #     pc for pc in plant_codes
+    #     if not os.path.exists(f'results/scores/{pc}.json')
+    # ]
+
+    # plant_infos = [info for code, info in zip(df['plant_code'], df['plant_info']) if code in plant_codes]
+    # all_content = []
+    # for plant_code in plant_codes[:1]:
+    #     with open(f'results/content/{plant_code}.json', 'r') as f:
+    #         content = json.load(f)
+    #         all_content.append(content['full_text'])
+    # print("Finished appending all content.")
+    # with ThreadPoolExecutor(max_workers=10) as executor:
+    #     future_to_plant_code = {
+    #         executor.submit(get_project_summary, plant_info, content): plant_code
+    #         for plant_code, plant_info, content in zip(plant_codes, plant_infos, all_content)
+    #         if not os.path.exists(f'results/scores/{plant_code}.json')
+    #     }
+    #     for future in tqdm(as_completed(future_to_plant_code), total=len(future_to_plant_code)):
+    #         plant_code = future_to_plant_code[future]
+    #         summary = future.result()
+    #         with open(f'results/scores/{plant_code}.json', 'w') as f:
+    #             json.dump(summary.model_dump(), f)
     
 
     
